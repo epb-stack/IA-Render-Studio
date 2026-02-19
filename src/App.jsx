@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 const COLORS = {
   bg: "#f0ece4", bgDark: "#2a2520", gold: "#b8963e", goldLight: "#c9a84c",
@@ -43,6 +43,265 @@ function FadeIn({ children, delay = 0, style = {} }) {
   return <div ref={ref} style={{ opacity: v ? 1 : 0, transform: v ? "translateY(0)" : "translateY(30px)", transition: `all 0.8s cubic-bezier(0.23,1,0.32,1) ${delay}s`, ...style }}>{children}</div>;
 }
 
+const GEMINI_KEY = process.env.REACT_APP_GEMINI_API_KEY;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_KEY}`;
+
+const RENDER_STYLES = [
+  { id: "photorealistic", label: "Fotorrealista", prompt: "photorealistic architectural render with natural lighting, high detail, 8K quality, realistic materials and textures" },
+  { id: "modern", label: "Moderno", prompt: "modern contemporary architectural render with clean lines, minimalist aesthetics, neutral tones, large windows" },
+  { id: "minimalist", label: "Minimalista", prompt: "minimalist architectural render with simple forms, white and light gray palette, clean spaces, subtle shadows" },
+  { id: "luxury", label: "Luxo", prompt: "luxury high-end architectural render with premium materials, marble, gold accents, dramatic lighting, opulent finishes" },
+  { id: "night", label: "Noturno", prompt: "nighttime architectural render with warm interior lighting glowing through windows, dramatic exterior illumination, moody atmosphere" },
+];
+
+function RenderTool() {
+  const [image, setImage] = useState(null);
+  const [imageBase64, setImageBase64] = useState(null);
+  const [imageMime, setImageMime] = useState(null);
+  const [prompt, setPrompt] = useState("");
+  const [style, setStyle] = useState("photorealistic");
+  const [status, setStatus] = useState("idle"); // idle | loading | describing | done | error
+  const [result, setResult] = useState(null); // { imageUrl, text }
+  const [errorMsg, setErrorMsg] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef(null);
+
+  const font = "'Cormorant Garamond','Georgia',serif";
+  const fontSans = "'Montserrat','Helvetica Neue',sans-serif";
+
+  const handleFile = useCallback((file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setErrorMsg("Envie apenas imagens (JPG, PNG)."); setStatus("error"); return; }
+    if (file.size > 4 * 1024 * 1024) { setErrorMsg("Imagem muito grande. Máximo 4MB."); setStatus("error"); return; }
+    setImage(URL.createObjectURL(file));
+    setImageMime(file.type);
+    const reader = new FileReader();
+    reader.onload = () => setImageBase64(reader.result.split(",")[1]);
+    reader.readAsDataURL(file);
+    setStatus("idle");
+    setErrorMsg("");
+  }, []);
+
+  const removeImage = () => { setImage(null); setImageBase64(null); setImageMime(null); };
+
+  const describeImage = async () => {
+    if (!imageBase64) return;
+    setStatus("describing");
+    try {
+      const res = await fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inlineData: { mimeType: imageMime, data: imageBase64 } },
+            { text: "Descreva esta imagem em detalhes como um prompt de renderização arquitetônica profissional. Inclua: tipo de ambiente, materiais visíveis, iluminação, estilo arquitetônico, móveis, cores predominantes e atmosfera. Responda em português, formato de prompt direto e conciso, sem introduções ou explicações." }
+          ]}],
+          generationConfig: { responseModalities: ["TEXT"] }
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const textPart = data.candidates?.[0]?.content?.parts?.find(p => p.text);
+      if (textPart) setPrompt(textPart.text);
+      setStatus("idle");
+    } catch (err) {
+      setErrorMsg("Erro ao descrever imagem: " + err.message);
+      setStatus("error");
+    }
+  };
+
+  const generate = async () => {
+    if (!prompt.trim() && !imageBase64) { setErrorMsg("Adicione uma imagem ou descreva o que deseja renderizar."); setStatus("error"); return; }
+    setStatus("loading");
+    setResult(null);
+    setErrorMsg("");
+    try {
+      const styleObj = RENDER_STYLES.find(s => s.id === style);
+      const parts = [];
+      if (imageBase64) parts.push({ inlineData: { mimeType: imageMime, data: imageBase64 } });
+
+      let textPrompt;
+      if (imageBase64 && prompt.trim()) {
+        textPrompt = `Transform this image into a ${styleObj.prompt}. Additional instructions: ${prompt.trim()}`;
+      } else if (imageBase64) {
+        textPrompt = `Transform this image into a ${styleObj.prompt}. Keep the same composition and architectural elements.`;
+      } else {
+        textPrompt = `Create a ${styleObj.prompt} of: ${prompt.trim()}. Professional architectural visualization.`;
+      }
+      parts.push({ text: textPrompt });
+
+      const res = await fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { responseModalities: ["TEXT", "IMAGE"] }
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      const resParts = data.candidates?.[0]?.content?.parts || [];
+      let imageUrl = null, resText = "";
+      for (const part of resParts) {
+        if (part.inlineData) imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+        if (part.text) resText = part.text;
+      }
+      if (!imageUrl) throw new Error("Nenhuma imagem foi gerada. Tente reformular o prompt.");
+      setResult({ imageUrl, text: resText });
+      setStatus("done");
+    } catch (err) {
+      setErrorMsg("Erro: " + err.message);
+      setStatus("error");
+    }
+  };
+
+  const downloadResult = () => {
+    if (!result?.imageUrl) return;
+    const a = document.createElement("a");
+    a.href = result.imageUrl;
+    a.download = `ia-render-studio-${Date.now()}.png`;
+    a.click();
+  };
+
+  const inputStyle = { width: "100%", background: "rgba(255,255,255,0.6)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 6, padding: "14px 16px", fontFamily: fontSans, fontSize: 14, color: COLORS.text, fontWeight: 300, outline: "none", transition: "border-color 0.3s" };
+
+  return (
+    <section id="render" style={{ padding: `clamp(80px,12vw,140px) clamp(20px,5vw,60px)`, background: COLORS.bg }}>
+      <FadeIn>
+        <div style={{ fontFamily: fontSans, fontSize: 11, letterSpacing: 4, textTransform: "uppercase", color: COLORS.gold, marginBottom: 16, fontWeight: 500 }}>EXPERIMENTE</div>
+        <h2 style={{ fontFamily: font, fontSize: "clamp(32px,5vw,48px)", fontWeight: 400, lineHeight: 1.15, color: COLORS.black, marginBottom: 16 }}>Teste nossa<br /><em style={{ fontWeight: 300 }}>renderização com IA</em></h2>
+        <p style={{ fontFamily: fontSans, fontSize: "clamp(14px,1.6vw,15px)", lineHeight: 1.7, color: COLORS.textLight, fontWeight: 300, maxWidth: 560, marginBottom: 48 }}>Envie uma imagem ou descreva o ambiente desejado. Nossa IA transformará sua visão em uma renderização profissional.</p>
+      </FadeIn>
+
+      <FadeIn delay={0.1}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "clamp(32px,4vw,60px)", alignItems: "start" }} className="render-grid">
+
+          {/* LEFT — inputs */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+
+            {/* Upload area */}
+            {!image ? (
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
+                onClick={() => fileRef.current?.click()}
+                style={{ border: `2px dashed ${dragOver ? COLORS.gold : "rgba(0,0,0,0.12)"}`, borderRadius: 8, padding: "48px 24px", textAlign: "center", cursor: "pointer", transition: "all 0.3s", background: dragOver ? "rgba(184,150,62,0.04)" : "rgba(255,255,255,0.4)" }}
+              >
+                <input ref={fileRef} type="file" accept="image/jpeg,image/png" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={COLORS.gold} strokeWidth="1.2" style={{ marginBottom: 16 }}><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <div style={{ fontFamily: fontSans, fontSize: 14, color: COLORS.text, fontWeight: 400, marginBottom: 6 }}>Arraste uma imagem ou clique para enviar</div>
+                <div style={{ fontFamily: fontSans, fontSize: 12, color: COLORS.textLight, fontWeight: 300 }}>JPG ou PNG • Máximo 4MB</div>
+              </div>
+            ) : (
+              <div style={{ position: "relative", borderRadius: 8, overflow: "hidden" }}>
+                <img src={image} alt="Upload" style={{ width: "100%", height: 220, objectFit: "cover", display: "block", borderRadius: 8 }} />
+                <button onClick={removeImage} style={{ position: "absolute", top: 8, right: 8, width: 32, height: 32, borderRadius: "50%", background: "rgba(0,0,0,0.6)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+                {/* Describe button */}
+                <button onClick={describeImage} disabled={status === "describing"} style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 6, padding: "8px 14px", cursor: status === "describing" ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, transition: "all 0.3s" }}>
+                  {status === "describing" ? (
+                    <div style={{ width: 14, height: 14, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: COLORS.gold, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={COLORS.goldLight} strokeWidth="2"><path d="M12 2l2.4 7.4H22l-6.2 4.5L18.2 22 12 17.5 5.8 22l2.4-8.1L2 9.4h7.6z"/></svg>
+                  )}
+                  <span style={{ fontFamily: fontSans, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "white", fontWeight: 400 }}>{status === "describing" ? "Analisando..." : "Descrever Imagem"}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Prompt */}
+            <div>
+              <label style={{ fontFamily: fontSans, fontSize: 10, letterSpacing: 3, textTransform: "uppercase", color: COLORS.textLight, display: "block", marginBottom: 8, fontWeight: 500 }}>DESCREVA O AMBIENTE</label>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Ex: Sala de estar ampla com pé-direito duplo, piso de madeira clara, sofá em L cinza, janelas do piso ao teto com vista para jardim..."
+                rows={4}
+                style={{ ...inputStyle, resize: "vertical", minHeight: 100 }}
+              />
+            </div>
+
+            {/* Style selector */}
+            <div>
+              <label style={{ fontFamily: fontSans, fontSize: 10, letterSpacing: 3, textTransform: "uppercase", color: COLORS.textLight, display: "block", marginBottom: 10, fontWeight: 500 }}>ESTILO DE RENDERIZAÇÃO</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {RENDER_STYLES.map(s => (
+                  <button key={s.id} onClick={() => setStyle(s.id)} style={{ fontFamily: fontSans, fontSize: 12, fontWeight: style === s.id ? 500 : 300, letterSpacing: 1, color: style === s.id ? "white" : COLORS.text, background: style === s.id ? COLORS.gold : "rgba(255,255,255,0.6)", border: `1px solid ${style === s.id ? COLORS.gold : "rgba(0,0,0,0.08)"}`, borderRadius: 20, padding: "8px 18px", cursor: "pointer", transition: "all 0.3s" }}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Generate button */}
+            <button onClick={generate} disabled={status === "loading"} style={{ fontFamily: fontSans, fontSize: 12, letterSpacing: 3, textTransform: "uppercase", fontWeight: 500, color: "white", background: status === "loading" ? COLORS.textLight : COLORS.gold, border: "none", padding: "18px 40px", cursor: status === "loading" ? "wait" : "pointer", borderRadius: 4, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10, alignSelf: "flex-start", minWidth: 240, transition: "all 0.3s", opacity: status === "loading" ? 0.7 : 1 }}>
+              {status === "loading" ? (
+                <>
+                  <div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "white", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                  RENDERIZANDO...
+                </>
+              ) : (
+                <>
+                  RENDERIZAR
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M12 2l2.4 7.4H22l-6.2 4.5L18.2 22 12 17.5 5.8 22l2.4-8.1L2 9.4h7.6z"/></svg>
+                </>
+              )}
+            </button>
+
+            {/* Error */}
+            {status === "error" && (
+              <div style={{ fontFamily: fontSans, fontSize: 13, color: "#c0392b", background: "rgba(192,57,43,0.06)", border: "1px solid rgba(192,57,43,0.15)", borderRadius: 6, padding: "12px 16px", fontWeight: 400 }}>
+                {errorMsg}
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT — result */}
+          <div style={{ minHeight: 300, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {status === "loading" ? (
+              <div style={{ textAlign: "center" }}>
+                <div style={{ width: 48, height: 48, border: `3px solid rgba(184,150,62,0.15)`, borderTopColor: COLORS.gold, borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 20px" }} />
+                <div style={{ fontFamily: fontSans, fontSize: 14, color: COLORS.textLight, fontWeight: 300 }}>Gerando renderização...</div>
+                <div style={{ fontFamily: fontSans, fontSize: 12, color: COLORS.textLight, fontWeight: 300, marginTop: 6, opacity: 0.6 }}>Isso pode levar alguns segundos</div>
+              </div>
+            ) : result ? (
+              <div style={{ width: "100%", animation: "fadeIn 0.6s ease" }}>
+                <div style={{ borderRadius: 8, overflow: "hidden", marginBottom: 16, boxShadow: "0 8px 32px rgba(0,0,0,0.1)" }}>
+                  <img src={result.imageUrl} alt="Renderização gerada" style={{ width: "100%", display: "block" }} />
+                </div>
+                {result.text && (
+                  <p style={{ fontFamily: fontSans, fontSize: 13, color: COLORS.textLight, fontWeight: 300, lineHeight: 1.6, marginBottom: 16 }}>{result.text}</p>
+                )}
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button onClick={downloadResult} style={{ fontFamily: fontSans, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", fontWeight: 500, color: "white", background: COLORS.gold, border: "none", padding: "12px 24px", cursor: "pointer", borderRadius: 4, display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    DOWNLOAD
+                  </button>
+                  <button onClick={() => { setResult(null); setStatus("idle"); }} style={{ fontFamily: fontSans, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", fontWeight: 400, color: COLORS.text, background: "transparent", border: `1px solid rgba(0,0,0,0.12)`, padding: "12px 24px", cursor: "pointer", borderRadius: 4 }}>
+                    NOVA RENDERIZAÇÃO
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", opacity: 0.4 }}>
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke={COLORS.textLight} strokeWidth="0.8" style={{ marginBottom: 16 }}>
+                  <rect x="2" y="2" width="20" height="20" rx="2"/>
+                  <circle cx="8.5" cy="8.5" r="1.5"/>
+                  <path d="M21 15l-5-5L5 21"/>
+                </svg>
+                <div style={{ fontFamily: fontSans, fontSize: 14, color: COLORS.textLight, fontWeight: 300 }}>A renderização aparecerá aqui</div>
+              </div>
+            )}
+          </div>
+        </div>
+      </FadeIn>
+    </section>
+  );
+}
+
 export default function IARenderStudio() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
@@ -53,13 +312,13 @@ export default function IARenderStudio() {
 
   const font = "'Cormorant Garamond','Georgia',serif";
   const fontSans = "'Montserrat','Helvetica Neue',sans-serif";
-  const navItems = [{ l: "Início", id: "hero" }, { l: "Portfólio", id: "portfolio" }, { l: "Sobre", id: "about" }, { l: "Contato", id: "contact" }];
+  const navItems = [{ l: "Início", id: "hero" }, { l: "Render IA", id: "render" }, { l: "Portfólio", id: "portfolio" }, { l: "Sobre", id: "about" }, { l: "Contato", id: "contact" }];
   const pad = "clamp(20px,5vw,60px)";
 
   return (
     <div style={{ fontFamily: fontSans, color: COLORS.text, background: COLORS.bg, overflowX: "hidden" }}>
       <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600&family=Montserrat:wght@300;400;500;600&display=swap" rel="stylesheet" />
-      <style>{`*{margin:0;padding:0;box-sizing:border-box}html{scroll-behavior:smooth}::selection{background:${COLORS.gold};color:white}@keyframes fadeInUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes scaleIn{from{transform:scale(1.1)}to{transform:scale(1)}}@keyframes slideDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes scrollLine{0%{transform:scaleY(0);transform-origin:top}50%{transform:scaleY(1);transform-origin:top}50.01%{transform-origin:bottom}100%{transform:scaleY(0);transform-origin:bottom}}input::placeholder,textarea::placeholder{color:rgba(255,255,255,0.35)}input:focus,textarea:focus{outline:none;border-color:${COLORS.gold}!important}select{-webkit-appearance:none;-moz-appearance:none;appearance:none}@media(max-width:768px){.nav-links{display:none!important}.nav-hamburger{display:flex!important}.portfolio-grid{grid-template-columns:1fr!important}.about-grid{grid-template-columns:1fr!important}.contact-grid{grid-template-columns:1fr!important}}`}</style>
+      <style>{`*{margin:0;padding:0;box-sizing:border-box}html{scroll-behavior:smooth}::selection{background:${COLORS.gold};color:white}@keyframes fadeInUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes scaleIn{from{transform:scale(1.1)}to{transform:scale(1)}}@keyframes slideDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes scrollLine{0%{transform:scaleY(0);transform-origin:top}50%{transform:scaleY(1);transform-origin:top}50.01%{transform-origin:bottom}100%{transform:scaleY(0);transform-origin:bottom}}input::placeholder,textarea::placeholder{color:rgba(255,255,255,0.35)}input:focus,textarea:focus{outline:none;border-color:${COLORS.gold}!important}select{-webkit-appearance:none;-moz-appearance:none;appearance:none}@media(max-width:768px){.nav-links{display:none!important}.nav-hamburger{display:flex!important}.portfolio-grid{grid-template-columns:1fr!important}.about-grid{grid-template-columns:1fr!important}.contact-grid{grid-template-columns:1fr!important}.render-grid{grid-template-columns:1fr!important}}`}</style>
 
       {/* NAV */}
       <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, padding: `0 ${pad}`, height: 72, display: "flex", alignItems: "center", justifyContent: "space-between", background: scrolled ? "rgba(240,236,228,0.95)" : "transparent", backdropFilter: scrolled ? "blur(12px)" : "none", borderBottom: scrolled ? "1px solid rgba(0,0,0,0.06)" : "none", transition: "all 0.4s ease" }}>
@@ -106,6 +365,9 @@ export default function IARenderStudio() {
           <div style={{ width: 1, height: 40, background: "rgba(255,255,255,0.4)", animation: "scrollLine 2s ease infinite" }}/>
         </div>
       </section>
+
+      {/* RENDER TOOL */}
+      <RenderTool />
 
       {/* PORTFOLIO */}
       <section id="portfolio" style={{ padding: `clamp(80px,12vw,140px) ${pad}`, background: COLORS.bg }}>
