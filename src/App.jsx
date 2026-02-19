@@ -44,7 +44,7 @@ function FadeIn({ children, delay = 0, style = {} }) {
 }
 
 const GEMINI_KEY = process.env.REACT_APP_GEMINI_API_KEY;
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-image:generateContent?key=${GEMINI_KEY}`;
 
 const RENDER_STYLES = [
   { id: "photorealistic", label: "Fotorrealista", prompt: "photorealistic architectural render with natural lighting, high detail, 8K quality, realistic materials and textures" },
