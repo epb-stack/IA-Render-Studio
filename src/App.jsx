@@ -44,7 +44,8 @@ function FadeIn({ children, delay = 0, style = {} }) {
 }
 
 const GEMINI_KEY = process.env.REACT_APP_GEMINI_API_KEY;
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-image:generateContent?key=${GEMINI_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${GEMINI_KEY}`;
+const GEMINI_TEXT_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
 
 const RENDER_STYLES = [
   { id: "photorealistic", label: "Fotorrealista", prompt: "photorealistic architectural render with natural lighting, high detail, 8K quality, realistic materials and textures" },
@@ -88,7 +89,7 @@ function RenderTool() {
     if (!imageBase64) return;
     setStatus("describing");
     try {
-      const res = await fetch(GEMINI_URL, {
+      const res = await fetch(GEMINI_TEXT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -105,7 +106,12 @@ function RenderTool() {
       if (textPart) setPrompt(textPart.text);
       setStatus("idle");
     } catch (err) {
-      setErrorMsg("Erro ao descrever imagem: " + err.message);
+      const msg = err.message || "";
+      if (msg.includes("quota") || msg.includes("Quota") || msg.includes("rate")) {
+        setErrorMsg("Limite de uso da API atingido. Tente novamente em alguns minutos.");
+      } else {
+        setErrorMsg("Erro ao descrever imagem: " + msg);
+      }
       setStatus("error");
     }
   };
@@ -151,7 +157,12 @@ function RenderTool() {
       setResult({ imageUrl, text: resText });
       setStatus("done");
     } catch (err) {
-      setErrorMsg("Erro: " + err.message);
+      const msg = err.message || "";
+      if (msg.includes("quota") || msg.includes("Quota") || msg.includes("rate")) {
+        setErrorMsg("Limite de uso da API atingido. Tente novamente em alguns minutos.");
+      } else {
+        setErrorMsg("Erro: " + msg);
+      }
       setStatus("error");
     }
   };
